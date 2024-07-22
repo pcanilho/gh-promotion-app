@@ -53,7 +53,7 @@ type Client struct {
 }
 
 // _clientCache - cache of GitHub clients
-var _clientCache = make(map[int64]*Client)
+var _clientCache map[int64]*Client = make(map[int64]*Client)
 
 type GitHub struct {
 	Credentials
@@ -282,110 +282,6 @@ func (g *GitHub) FastForwardRefToSha(pCtx *promotion.Context) error {
 
 	ctxLogger.Debug("successful fast forward")
 	return nil
-}
-
-type CommitStatus = string
-
-const (
-	CommitStatusSuccess CommitStatus = "success"
-	CommitStatusFailure              = "failure"
-	CommitStatusError                = "error"
-	CommitStatusPending              = "pending"
-)
-
-// SendPromotionFeedbackCommitStatus sends a commit status to the head commit of the promotion request
-func (g *GitHub) SendPromotionFeedbackCommitStatus(context string, promotionResult *promotion.Result, promotionError error, commitStatus CommitStatus) error {
-	// Validate required fields
-	if promotionResult == nil {
-		return fmt.Errorf("promotion result is nil")
-	}
-
-	pCtx := promotionResult.Context
-	feedbackLogger := pCtx.Logger.WithGroup("feedback:commit-status")
-	// Skip if the context is missing required fields
-	if pCtx.Owner == nil || pCtx.Repository == nil || pCtx.HeadSHA == nil {
-		feedbackLogger.Debug("ignoring promotion feedback commit status due to missing context fields",
-			slog.Any("context", pCtx))
-		return nil
-	}
-
-	// Set the target URL if a pull request is present
-	if pCtx.PullRequest == nil {
-		feedbackLogger.Debug("ignoring promotion feedback commit status due to missing PullRequest reference",
-			slog.Any("context", pCtx))
-		return nil
-	}
-
-	// Support placeholders
-	contextSubstitution := make(map[string]string)
-	if pCtx.HeadRef != nil && pCtx.BaseRef != nil {
-		contextSubstitution["{source}"] = helpers.ExtractRefFromFullRef(*pCtx.HeadRef)
-		contextSubstitution["{target}"] = helpers.ExtractRefFromFullRef(*pCtx.BaseRef)
-
-		for k, v := range contextSubstitution {
-			context = strings.ReplaceAll(context, k, v)
-		}
-	}
-
-	// Infer the commit status from the provided promotion.Result and error
-	stages, index := pCtx.Promoter.Stages, pCtx.Promoter.StageIndex(*pCtx.HeadRef)
-	progress := fmt.Sprintf("%d/%d", index+1, len(stages))
-
-	// Set the commit status message accordingly
-	var msg string
-	switch commitStatus {
-	case CommitStatusSuccess:
-		msg = "✅ Promotion successful :: {progress}"
-	case CommitStatusFailure:
-		msg = fmt.Sprintf("❌ Promotion failed: %v", promotionError)
-	case CommitStatusError:
-		msg = fmt.Sprintf("💥 Promotion internal error: %v", promotionError)
-	case CommitStatusPending:
-		msg = "⏳ Promotion pending Quality-Gates :: {progress}"
-	default:
-		return fmt.Errorf("unknown commit status: %s", commitStatus)
-	}
-
-	// Placeholders
-	msg = strings.ReplaceAll(msg, "{progress}", progress)
-
-	// Truncate (140 max length)
-	msg = helpers.Truncate(msg, 140)
-
-	status := &github.RepoStatus{
-		Description: github.String(msg),
-		Context:     github.String(context),
-		State:       github.String(commitStatus),
-		TargetURL:   pCtx.PullRequest.HTMLURL,
-	}
-
-	feedbackLogger.Debug("sending commit status",
-		slog.String("status", commitStatus), slog.String("context", context), slog.String("msg", msg),
-		slog.String("eventType", fmt.Sprintf("%T", pCtx.EventType)), slog.Any("promotionError", promotionError))
-	_, resp, err := pCtx.ClientV3.Repositories.CreateStatus(g.ctx, *pCtx.Owner, *pCtx.Repository, *pCtx.HeadSHA, status)
-
-	if err != nil {
-		var body []byte
-		if resp != nil && resp.Body != nil {
-			body, _ = io.ReadAll(resp.Body)
-		}
-		feedbackLogger.Error("failed to send commit status", slog.Any("error", err), slog.String("body", string(body)))
-		return errors.Wrapf(err, "failed to create commit status. status: %s, body: %s", status, body)
-	}
-	feedbackLogger.Debug("successfully sent commit status", slog.Any("status", status.String()), slog.Any("sha", *pCtx.HeadSHA))
-
-	return nil
-}
-
-// RateLimits fetches the rate limits for the currently authenticated identity
-func (g *GitHub) RateLimits(clt *github.Client) (*github.RateLimits, error) {
-	rate, _, err := clt.RateLimit.Get(g.ctx)
-	if err != nil {
-		g.logger.Error("failed to fetch rate limits", slog.Any("error", err))
-		return nil, err
-	}
-
-	return rate, nil
 }
 
 type CommitOnBranchRequest struct {
